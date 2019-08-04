@@ -105,13 +105,25 @@ func getCredentialsTOML(path string) (serviceCredentials, error) {
 	return credentials, nil
 }
 
-func initializeClients(credentials serviceCredentials) (clients, error) {
-	services := clients{}
+func saveCredentials(credentials serviceCredentials, filename string) error {
+	f, err := os.Create(filename)
 
-	// init plex client
+	if err != nil {
+		return err
+	}
 
-	return services, nil
+	return toml.NewEncoder(f).Encode(credentials)
 }
+
+// func initializeClients(credentials serviceCredentials) (*clients, error) {
+// 	services := &clients{}
+// 	var err error
+
+// 	// init plex client
+// 	services.Plex, err = plex.New("", credentials.PlexToken)
+
+// 	return services, err
+// }
 
 func logPrint(chanID, message string) {
 	fmt.Printf("%s - channel id: %s - %s\n", time.Now().String(), chanID, message)

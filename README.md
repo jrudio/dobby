@@ -63,7 +63,7 @@ This bot will respond to the trigger word `dobby`
 
 We need to link Dobby to our Plex Media Server
 
-On first run Dobby will give you a Plex PIN to authorize. So you will need go to `plex.tv/activate` and link Dobby to your server
+On first run Dobby will give you a Plex PIN to authorize. So you will need go to `plex.tv/link` and link Dobby to your server
 
 Work In Progress...
 

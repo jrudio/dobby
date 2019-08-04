@@ -6,27 +6,37 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/jrudio/go-plex-client"
 )
 
+type plexCommands struct {
+	hooks []func(channelID string, args ...string) bool
+}
+
 type d struct {
-	cmds    map[string]func(channelID string, args ...string)
+	cmds    map[string][]func(channelID string, args ...string) bool
 	discord *discordgo.Session
 }
 
 func newDiscord(session *discordgo.Session) d {
 	return d{
-		cmds:    map[string]func(channelID string, args ...string){},
+		cmds:    map[string][]func(channelID string, args ...string) bool{},
 		discord: session,
 	}
 }
 
-func (discord d) addCommand(cmd string, fn func(channelID string, args ...string)) {
+func (discord d) addCommand(cmd string, fn ...func(channelID string, args ...string) bool) {
 	discord.cmds[cmd] = fn
 }
 
 func (discord d) execute(channelID, cmd string, args ...string) {
-	if fn, ok := discord.cmds[cmd]; ok {
-		fn(channelID, args...)
+	if functions, ok := discord.cmds[cmd]; ok {
+		for _, fn := range functions {
+			if _ok := fn(channelID, args...); !_ok {
+				// stop subsequent commands if current function returns false
+				break
+			}
+		}
 	} else {
 		if isVerbose {
 			fmt.Printf("invalid command: %s\n", cmd)
@@ -82,8 +92,8 @@ func (discord d) showError(channelID, msg string) {
 	}
 }
 
-func clearMessages(commandList d, services clients) func(channelID string, args ...string) {
-	return func(channelID string, args ...string) {
+func clearMessages(commandList d, services *clients) func(channelID string, args ...string) bool {
+	return func(channelID string, args ...string) bool {
 		argCount := len(args)
 		messageLimit := 0
 
@@ -97,7 +107,7 @@ func clearMessages(commandList d, services clients) func(channelID string, args 
 					channelID,
 					err)
 
-				return
+				return true
 			}
 
 			messageLimit = limit
@@ -107,7 +117,7 @@ func clearMessages(commandList d, services clients) func(channelID string, args 
 
 		if err != nil {
 			fmt.Printf("failed to retrieve message ids: %v\n", err)
-			return
+			return true
 		}
 
 		messageIDs := make([]string, len(messages))
@@ -120,8 +130,147 @@ func clearMessages(commandList d, services clients) func(channelID string, args 
 			fmt.Printf("failed to delete messages: %v\n", err)
 			commandList.showError(channelID, err.Error())
 		}
+
+		return true
 	}
 }
+
+func displayPlexPIN(commandList d, services *clients) func(channelID string, args ...string) bool {
+	return func(channelID string, args ...string) bool {
+		if isPlexTokenAuthorized {
+			if isVerbose {
+				fmt.Println("displayPlexPIN() - dobby is already authorized")
+			}
+			return true
+		}
+
+		if isRequestingPlexPIN {
+			return true
+		}
+
+		message := "Dobby is not authorized to access your Plex Media Server\n"
+
+		isRequestingPlexPIN = true
+
+		requestHeaders := services.plex.Headers
+
+		resp, err := plex.RequestPIN(requestHeaders)
+
+		if err != nil {
+			isRequestingPlexPIN = false
+			return false
+		}
+
+		message += fmt.Sprintf("Plex PIN: `%s`\nPlease go to https://plex.tv/link and link your account using the code above", resp.Code)
+
+		commandList.discord.ChannelMessageSend(channelID, message)
+
+		checkPlexPIN(resp, func(plexAuthToken string) {
+			// when we are authorized
+
+			services.setPlexToken(plexAuthToken)
+
+			message = "Successfully linked Dobby! :D"
+
+			commandList.discord.ChannelMessageSend(channelID, message)
+
+			// persist plex auth token
+			creds, err := getCredentialsTOML(secretsFilepath)
+
+			if err != nil {
+				fmt.Printf("checkPlexPIN() - error getting credentials: %v\n", err)
+				message = "`internal error - could not save plex authorization token`"
+				commandList.discord.ChannelMessageSend(channelID, message)
+				isRequestingPlexPIN = false
+				return
+			}
+
+			creds.PlexToken = plexAuthToken
+
+			if err := saveCredentials(creds, secretsFilepath); err != nil {
+				fmt.Printf("checkPlexPIN() - saveCredentials failed: %v\n", err)
+				message = "`internal error - could not save plex authorization token`"
+				commandList.discord.ChannelMessageSend(channelID, message)
+				isRequestingPlexPIN = false
+				return
+			}
+
+			if isVerbose {
+				fmt.Println("saved plex auth token to file")
+			}
+
+			isRequestingPlexPIN = false
+		}, func(errMessage string) {
+			// when we encounter an error
+			message = fmt.Sprintf("we have encountered an error :frowning2: :\n%v", errMessage)
+
+			commandList.discord.ChannelMessageSend(channelID, message)
+
+			isRequestingPlexPIN = false
+		})
+
+		return false
+	}
+}
+
+// checkPlexPIN is a loop to check if we are authorized to a Plex server
+func checkPlexPIN(_plexPIN plex.PinResponse, onSuccess func(plexAuthToken string), onError func(errMessage string)) {
+	// TODO: check expiration
+	fmt.Println("checkPlexPIN()")
+	i := 0
+	for {
+		if _plexPIN.Code == "" {
+			fmt.Println("checkPlexPIN() invalid or no plex pin was passed")
+			onError("internal error: checkPlexPIN() invalid or no plex pin was passed")
+			return
+		}
+
+		fmt.Println("checkPlexPIN() - loop", i)
+
+		// end loop when we are authorized
+		resp, err := plex.CheckPIN(_plexPIN.ID, _plexPIN.ClientIdentifier)
+		i++
+
+		if err != nil && err.Error() == "pin is not authorized yet" {
+			// not authorized keep checking
+			fmt.Println("not authorized yet -- sleeping for 1 second")
+			time.Sleep(1 * time.Second)
+			continue
+		} else if err != nil {
+			onError(err.Error())
+			return
+		}
+
+		// we are authorized!
+		onSuccess(resp.AuthToken)
+
+		return
+	}
+}
+
+// invite invite a plex user to your Plex Media Server
+func invite(commandList d, services *clients) func(channelID string, args ...string) bool {
+	return func(channelID string, args ...string) bool {
+		if !isPlexTokenAuthorized {
+			fmt.Println("invite() - dobby is not authorized")
+			commandList.discord.ChannelMessageSend(channelID, "dobby is not authorized to send invites!")
+			return false
+		}
+
+		commandList.discord.ChannelMessageSend(channelID, "inviting user to our Plex Media Server")
+
+		return true
+	}
+}
+
+// search search media for on your Plex Media Server
+// func search(commandList d, services *clients) func(channelID string, args ...string) bool {
+// 	return func(channelID string, args ...string) bool {
+// 		commandList.discord.ChannelMessageSend(channelID, "inviting user to our Plex Media Server")
+
+// 		return true
+// 	}
+// }
 
 // func showLibrary(commandList d, services clients) func(channelID string, args ...string) {
 // 	return func(channelID string, args ...string) {

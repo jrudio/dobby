@@ -5,22 +5,29 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/jrudio/go-plex-client"
 )
 
 const (
 	// keyword is the trigger word for our program to listen to
-	keyword = "dobby"
+	keyword         = "dobby"
+	secretsFilepath = "./secrets.toml"
 )
 
 var (
-	keywordLen  = 0
-	commandList commands
-	isVerbose   bool
-	version     string
-	versionFlag *bool
+	keywordLen            = 0
+	commandList           commands
+	isVerbose             bool
+	isPlexTokenAuthorized bool
+	isRequestingPlexPIN   bool
+	version               string
+	versionFlag           *bool
+	plexPIN               chan plex.PinResponse
 )
 
 type commands interface {
@@ -28,7 +35,7 @@ type commands interface {
 	isValid(cmd string) bool
 	showHelp(channelID string)
 	showError(channelID string, msg string)
-	addCommand(cmd string, fn func(channelID string, args ...string))
+	addCommand(cmd string, fn ...func(channelID string, args ...string) bool)
 }
 
 type serviceCredentials struct {
@@ -37,9 +44,34 @@ type serviceCredentials struct {
 }
 
 type clients struct {
-	// TODO: maybe add discord here as well?
-	// radarr radarr.Client
-	// sonarr *sonarr.Sonarr
+	plex *plex.Plex
+	lock sync.Mutex
+}
+
+func (c *clients) setPlexRequestTimeout(timeout int) {
+	// in seconds
+	c.lock.Lock()
+	c.plex.HTTPClient.Timeout = time.Duration(timeout) * time.Second
+	c.lock.Unlock()
+}
+
+func (c *clients) setPlexClientID(clientID string) {
+	c.lock.Lock()
+	c.plex.ClientIdentifier = clientID
+	c.plex.Headers.ClientIdentifier = clientID
+	c.lock.Unlock()
+}
+
+func (c *clients) setPlexToken(authToken string) {
+	c.lock.Lock()
+	c.plex.Token = authToken
+	c.lock.Unlock()
+}
+
+func (c *clients) setPlexHost(host string) {
+	c.lock.Lock()
+	c.plex.URL = host
+	c.lock.Unlock()
 }
 
 func checkErrAndExit(err error) {
@@ -56,7 +88,7 @@ func main() {
 	if err != nil {
 		// most likely errTokenRequired error because user did not pass info via flags
 		// try secrets.toml
-		credentials, err = getCredentialsTOML("./secrets.toml")
+		credentials, err = getCredentialsTOML(secretsFilepath)
 
 		if err != nil {
 			fmt.Printf("need credentials: %v\n", err)
@@ -69,10 +101,71 @@ func main() {
 		os.Exit(1)
 	}
 
-	services, err := initializeClients(credentials)
+	services := clients{
+		plex: &plex.Plex{},
+		lock: sync.Mutex{},
+	}
 
-	checkErrAndExit(err)
+	plexClientID := "Dobby (discord bot)" + version
 
+	if credentials.PlexToken != "" {
+
+		// initialize plex client
+		services.plex, err = plex.New("", credentials.PlexToken)
+
+		if err != nil {
+			fmt.Printf("failed to initialize plex client: %v\n", err)
+			return
+		}
+
+		// change plex client information to match Dobby
+		services.setPlexClientID(plexClientID)
+
+		// pick a server and test the auth token
+		serverInfo, err := services.plex.GetServersInfo()
+
+		if err != nil {
+			fmt.Printf("plex.GetServersInfo() - failed testing auth token: %v\n", err)
+			return
+		}
+
+		// TODO: refactor -- too many if-statements!
+
+		if serverInfo.Size > 0 {
+			plexServer := serverInfo.Server[0]
+			plexHost := plexServer.Scheme + "://" + plexServer.Address + ":" + plexServer.Port
+
+			services.setPlexHost(plexHost)
+
+			// check if plex auth token is valid
+			isOK, err := services.plex.Test()
+
+			if err != nil {
+				fmt.Printf("plex.Test() - auth test failed: %v\n", err)
+			}
+
+			if !isOK {
+				fmt.Println("we are not authorized. prompt to authorize plex PIN")
+			} else {
+				isPlexTokenAuthorized = true
+			}
+		} else {
+			fmt.Println("we are not authorized. prompt to authorize plex PIN")
+		}
+
+	}
+
+	if services.plex.Headers.ClientIdentifier != "Dobby (discord bot)"+version || services.plex.ClientIdentifier != "Dobby (discord bot)"+version {
+		services.setPlexClientID(plexClientID)
+	}
+
+	services.lock = sync.Mutex{}
+
+	services.setPlexRequestTimeout(10)
+
+	plexPIN = make(chan plex.PinResponse)
+
+	// connect to Discord server
 	discord, err := discordgo.New("Bot " + credentials.DiscordToken)
 
 	checkErrAndExit(err)
@@ -82,7 +175,7 @@ func main() {
 
 	commandList := newDiscord(discord)
 
-	commandList = addCommands(commandList, services)
+	commandList = addCommands(commandList, &services)
 
 	discord.AddHandler(onMsgCreate(commandList))
 
@@ -158,10 +251,13 @@ func onMsgCreate(commandList commands) func(s *discordgo.Session, m *discordgo.M
 	}
 }
 
-func addCommands(commandList d, services clients) d {
+func addCommands(commandList d, services *clients) d {
 
 	// clear deletes messages in a channel -- user can delete x messages
 	commandList.addCommand("clear", clearMessages(commandList, services))
+
+	// plex-specific commands
+	commandList.addCommand("invite", displayPlexPIN(commandList, services), invite(commandList, services))
 
 	return commandList
 }
