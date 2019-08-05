@@ -174,6 +174,8 @@ func displayPlexPIN(commandList d, services *clients) func(channelID string, arg
 
 			commandList.discord.ChannelMessageSend(channelID, message)
 
+			isPlexTokenAuthorized = true
+
 			// persist plex auth token
 			creds, err := getCredentialsTOML(secretsFilepath)
 

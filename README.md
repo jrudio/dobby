@@ -30,6 +30,13 @@ To get a discord token go to `https://discordapp.com/developers/applications/me`
 - go back to `https://discordapp.com/developers/applications/me` 
 - copy `token` and put in `secrets.toml`
 
+Your `secrets.toml` should look like this:
+
+```toml
+discordToken="abc123"
+plexToken="abc123"
+```
+
 Docker
 ===
 
