@@ -39,8 +39,14 @@ type commands interface {
 }
 
 type serviceCredentials struct {
-	DiscordToken string `toml:"discordToken"`
-	PlexToken    string
+	DiscordToken string          `toml:"discordToken"`
+	Plex         plexCredentials `toml:"plex"`
+}
+
+type plexCredentials struct {
+	Token     string
+	Host      string
+	machineID string
 }
 
 type clients struct {
@@ -108,10 +114,10 @@ func main() {
 
 	plexClientID := "Dobby (discord bot)" + version
 
-	if credentials.PlexToken != "" {
+	if credentials.Plex.Token != "" {
 
 		// initialize plex client
-		services.plex, err = plex.New("", credentials.PlexToken)
+		services.plex, err = plex.New("", credentials.Plex.Token)
 
 		if err != nil {
 			fmt.Printf("failed to initialize plex client: %v\n", err)

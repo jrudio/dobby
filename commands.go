@@ -187,7 +187,7 @@ func displayPlexPIN(commandList d, services *clients) func(channelID string, arg
 				return
 			}
 
-			creds.PlexToken = plexAuthToken
+			creds.Plex.Token = plexAuthToken
 
 			if err := saveCredentials(creds, secretsFilepath); err != nil {
 				fmt.Printf("checkPlexPIN() - saveCredentials failed: %v\n", err)
@@ -215,7 +215,7 @@ func displayPlexPIN(commandList d, services *clients) func(channelID string, arg
 	}
 }
 
-// checkPlexPIN is a loop to check if we are authorized to a Plex server
+// checkPlexPIN is a loop to check if we are authorized to access a Plex server
 func checkPlexPIN(_plexPIN plex.PinResponse, onSuccess func(plexAuthToken string), onError func(errMessage string)) {
 	// TODO: check expiration
 	fmt.Println("checkPlexPIN()")
@@ -259,7 +259,45 @@ func invite(commandList d, services *clients) func(channelID string, args ...str
 			return false
 		}
 
+		if len(args) < 1 {
+			if isVerbose {
+				fmt.Println("invite() - need a username or an email to invite user to our plex server")
+			}
+
+			commandList.showError(channelID, "a username or an email is required")
+
+			return false
+		}
+
 		commandList.discord.ChannelMessageSend(channelID, "inviting user to our Plex Media Server")
+
+		machineID, err := services.plex.GetMachineID()
+
+		if err != nil {
+			fmt.Printf("invite() - could not fetch machine id: %v\n", err)
+			commandList.showError(channelID, "dobby error - could not get machine id from plex server")
+			return false
+		}
+
+		fmt.Println("machine id:", machineID)
+
+		usernameOrEmail := args[0]
+
+		params := plex.InviteFriendParams{
+			UsernameOrEmail: usernameOrEmail,
+			MachineID:       machineID,
+		}
+
+		if err := services.plex.InviteFriend(params); err != nil {
+			if isVerbose {
+				fmt.Printf("invite() - inviteFriend failed: %v\n", err)
+			}
+
+			commandList.showError(channelID, fmt.Sprintf("invite could not be sent to %s", usernameOrEmail))
+			return false
+		}
+
+		commandList.discord.ChannelMessageSend(channelID, fmt.Sprintf("invited %s to our Plex server", usernameOrEmail))
 
 		return true
 	}
